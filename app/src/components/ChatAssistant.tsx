@@ -2,8 +2,44 @@
 
 import { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { MessageSquare, X, Send, Bot, User, Loader2, Sparkles } from "lucide-react";
+import { MessageSquare, X, Send, Bot, User, Loader2, Sparkles, Copy, Check } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+
+const PreBlock = ({ children, ...props }: any) => {
+  const [copied, setCopied] = useState(false);
+  
+  let codeString = "";
+  if (children && children.props && children.props.children) {
+    codeString = String(children.props.children);
+  } else if (typeof children === "string") {
+    codeString = children;
+  }
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(codeString);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="relative group mt-2 rounded-lg overflow-hidden bg-black/50 border border-white/[0.08]">
+      <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+        <button
+          onClick={handleCopy}
+          className="p-1.5 rounded-md bg-white/10 hover:bg-white/20 text-text-muted hover:text-white transition-colors"
+          title="Copy code"
+        >
+          {copied ? <Check className="w-3 h-3 text-[#00e676]" /> : <Copy className="w-3 h-3" />}
+        </button>
+      </div>
+      <div className="p-3 overflow-x-auto scrollbar-thin">
+        <pre className="font-mono text-xs text-cyan-400" {...props}>
+          {children}
+        </pre>
+      </div>
+    </div>
+  );
+};
 
 interface Message {
   role: "user" | "assistant";
@@ -37,16 +73,24 @@ export default function ChatAssistant({ scanId, targetUrl }: ChatAssistantProps)
     }
   }, [messages, isOpen]);
 
-  const handleSend = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!input.trim() || loading) return;
+  const quickPrompts = [
+    "Explain the critical issues.",
+    "Give me an Nginx security config.",
+    "Show me a generic Node.js patch.",
+  ];
 
-    const userMessage = input.trim();
+  const handleSend = async (e?: React.FormEvent, promptText?: string) => {
+    if (e) e.preventDefault();
+    const userMessage = (promptText || input).trim();
+    if (!userMessage || loading) return;
+
     setInput("");
     setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
     setLoading(true);
 
     try {
+      setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -64,16 +108,40 @@ export default function ChatAssistant({ scanId, targetUrl }: ChatAssistantProps)
         throw new Error("Failed to get response from AI");
       }
 
-      const data = await response.json();
-      setMessages((prev) => [...prev, { role: "assistant", content: data.reply }]);
+      if (!response.body) throw new Error("No response body");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let done = false;
+
+      while (!done) {
+        const { value, done: readerDone } = await reader.read();
+        done = readerDone;
+        if (value) {
+          const chunk = decoder.decode(value, { stream: true });
+          setMessages((prev) => {
+            const newMessages = [...prev];
+            const lastIndex = newMessages.length - 1;
+            newMessages[lastIndex] = {
+              ...newMessages[lastIndex],
+              content: newMessages[lastIndex].content + chunk,
+            };
+            return newMessages;
+          });
+        }
+      }
     } catch {
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: "Sorry, I encountered an error connecting to the AI server. Please make sure your Gemini API key is valid and try again.",
-        },
-      ]);
+      setMessages((prev) => {
+        const newMessages = [...prev];
+        newMessages.pop();
+        return [
+          ...newMessages,
+          {
+            role: "assistant",
+            content: "Sorry, I encountered an error connecting to the AI server. Please make sure your Gemini API key is valid and try again.",
+          },
+        ];
+      });
     } finally {
       setLoading(false);
     }
@@ -165,12 +233,8 @@ export default function ChatAssistant({ scanId, targetUrl }: ChatAssistantProps)
                     >
                       <ReactMarkdown
                         components={{
-                          pre: ({ node: _node, ...props }) => (
-                            <div className="relative mt-2 rounded-lg overflow-x-auto bg-black/50 border border-white/[0.08] p-3 font-mono text-xs text-cyan-400">
-                              <pre {...props} />
-                            </div>
-                          ),
-                          code: ({ node: _node, ...props }) => (
+                          pre: PreBlock,
+                          code: ({ node: _node, ...props }: any) => (
                             <code className="px-1.5 py-0.5 rounded bg-white/5 font-mono text-xs text-cyan-400" {...props} />
                           ),
                         }}
@@ -192,8 +256,23 @@ export default function ChatAssistant({ scanId, targetUrl }: ChatAssistantProps)
                     </div>
                     <div className="bg-white/[0.03] border border-white/[0.06] rounded-2xl rounded-tl-none p-4 flex items-center gap-2 text-sm text-text-secondary">
                       <Loader2 className="w-4 h-4 animate-spin text-accent-cyan" />
-                      AI is formulating remediation steps...
+                      AI is typing...
                     </div>
+                  </div>
+                )}
+                
+                {/* Quick Prompts */}
+                {messages.length === 1 && !loading && (
+                  <div className="flex flex-wrap gap-2 mt-4">
+                    {quickPrompts.map((prompt, idx) => (
+                      <button
+                        key={idx}
+                        onClick={() => handleSend(undefined, prompt)}
+                        className="px-3 py-1.5 rounded-full border border-accent-cyan/20 bg-accent-cyan/5 text-xs text-accent-cyan hover:bg-accent-cyan/15 transition-colors cursor-pointer"
+                      >
+                        {prompt}
+                      </button>
+                    ))}
                   </div>
                 )}
                 <div ref={messagesEndRef} />

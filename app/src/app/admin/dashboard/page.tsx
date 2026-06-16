@@ -18,7 +18,8 @@ export default async function AdminDashboardPage() {
   // Fetch global scans data
   const { data: scans } = await serviceClient
     .from("scans")
-    .select("id, security_score, status, created_at");
+    .select("id, security_score, status, created_at, target_url, target_type, user_id")
+    .order("created_at", { ascending: false });
 
   // Fetch all vulnerabilities
   const { count: vulnCount } = await serviceClient
@@ -28,6 +29,7 @@ export default async function AdminDashboardPage() {
   const totalUsers = users?.length || 0;
   const totalScans = scans?.length || 0;
   const completedScans = scans?.filter(s => s.status === 'completed') || [];
+  const recentScans = scans?.slice(0, 10) || [];
   
   const avgScore = completedScans.length > 0
     ? Math.round(completedScans.reduce((sum, s) => sum + (s.security_score || 0), 0) / completedScans.length)
@@ -92,9 +94,69 @@ export default async function AdminDashboardPage() {
           <Activity className="w-5 h-5 text-accent-cyan" />
           Recent Platform Activity
         </h2>
-        <p className="text-text-secondary mb-4">
-          Detailed activity logs and charts will be displayed here in a future update.
-        </p>
+        
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm text-text-secondary">
+            <thead className="text-xs uppercase bg-white/5 text-text-primary border-b border-border">
+              <tr>
+                <th className="px-4 py-3">Target</th>
+                <th className="px-4 py-3">Type</th>
+                <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3">Score</th>
+                <th className="px-4 py-3 text-right">Date</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recentScans.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="px-4 py-8 text-center text-text-muted">
+                    No recent scans found.
+                  </td>
+                </tr>
+              ) : (
+                recentScans.map((scan) => (
+                  <tr key={scan.id} className="border-b border-white/[0.02] hover:bg-white/[0.02] transition-colors">
+                    <td className="px-4 py-3 font-medium text-white max-w-[200px] truncate" title={scan.target_url}>
+                      {scan.target_url}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="px-2 py-1 rounded bg-white/5 text-xs">
+                        {scan.target_type === "url" ? "Website" : "GitHub Repo"}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <div className={`w-2 h-2 rounded-full ${
+                          scan.status === "completed" ? "bg-severity-low" :
+                          scan.status === "failed" ? "bg-severity-critical" :
+                          "bg-accent-cyan animate-pulse"
+                        }`} />
+                        <span className="capitalize">{scan.status}</span>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      {scan.status === "completed" ? (
+                        <span className={`font-bold ${
+                          scan.security_score && scan.security_score >= 80 ? "text-severity-low" :
+                          scan.security_score && scan.security_score >= 60 ? "text-severity-medium" : "text-severity-high"
+                        }`}>
+                          {scan.security_score}/100
+                        </span>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-right whitespace-nowrap">
+                      {new Date(scan.created_at).toLocaleString(undefined, { 
+                        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' 
+                      })}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );

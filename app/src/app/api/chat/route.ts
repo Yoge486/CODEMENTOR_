@@ -79,11 +79,30 @@ Your goal:
       history: formattedHistory,
     });
 
-    const result = await chat.sendMessage(message);
-    const responseText = result.response.text();
+    const result = await chat.sendMessageStream(message);
 
-    return NextResponse.json({
-      reply: responseText,
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      async start(controller) {
+        try {
+          for await (const chunk of result.stream) {
+            const chunkText = chunk.text();
+            controller.enqueue(encoder.encode(chunkText));
+          }
+        } catch (e) {
+          controller.error(e);
+        } finally {
+          controller.close();
+        }
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Transfer-Encoding': 'chunked',
+        'Cache-Control': 'no-cache',
+      },
     });
   } catch (error: unknown) {
     console.error("Chat API error:", error);
