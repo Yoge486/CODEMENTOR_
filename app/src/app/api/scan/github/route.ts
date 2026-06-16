@@ -4,15 +4,38 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
+function scanForSecrets(content: string, filePath: string) {
+  const secrets = [];
+  const patterns = [
+    { name: "AWS Access Key", regex: /(A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}/g, severity: "critical" },
+    { name: "Stripe Secret Key", regex: /sk_(live|test)_[0-9a-zA-Z]{24}/g, severity: "critical" },
+    { name: "Google API Key", regex: /AIza[0-9A-Za-z-_]{35}/g, severity: "high" },
+    { name: "Generic Secret / Token", regex: /(secret|token|password|api_key|access_token)["'\s:=]+(["'][a-zA-Z0-9\-_]{16,}["'])/gi, severity: "medium" },
+    { name: "RSA Private Key", regex: /-----BEGIN RSA PRIVATE KEY-----/g, severity: "critical" }
+  ];
+
+  for (const pattern of patterns) {
+    const matches = content.match(pattern.regex);
+    if (matches && matches.length > 0) {
+      secrets.push({
+        name: `Hardcoded ${pattern.name}`,
+        description: `Found potential hardcoded secret matching ${pattern.name} in file: ${filePath}`,
+        severity: pattern.severity as "critical"|"high"|"medium"|"low"|"info",
+        category: "sast",
+        remediation: "Remove the hardcoded secret from the source code. Use environment variables or a secure secrets manager instead.",
+        ai_explanation: "Hardcoding secrets into source code allows anyone with access to the codebase to use these credentials, potentially leading to unauthorized access and data breaches."
+      });
+    }
+  }
+  return secrets;
+}
+
 export async function POST(req: Request) {
   try {
     const { url } = await req.json();
 
     if (!url || !url.includes("github.com")) {
-      return NextResponse.json(
-        { error: "Invalid GitHub URL provided" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Invalid GitHub URL provided" }, { status: 400 });
     }
 
     const supabase = await createServerSupabaseClient();
@@ -22,7 +45,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Parse URL: https://github.com/owner/repo
     const urlObj = new URL(url);
     const parts = urlObj.pathname.split("/").filter(Boolean);
     if (parts.length < 2) {
@@ -33,52 +55,68 @@ export async function POST(req: Request) {
     const repo = parts[1];
     const startTime = Date.now();
 
-    // 1. Fetch Repository Info
-    const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
-      headers: { "User-Agent": "BugHunter-AI" }
-    });
+    const githubHeaders = {
+      "User-Agent": "BugHunter-AI",
+      ...(process.env.GITHUB_ACCESS_TOKEN ? { "Authorization": `token ${process.env.GITHUB_ACCESS_TOKEN}` } : {})
+    };
+
+    const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers: githubHeaders });
     
     if (!repoRes.ok) {
-      return NextResponse.json({ error: "Could not access repository. It may be private or not exist." }, { status: 404 });
+      return NextResponse.json({ error: "Could not access repository. It may be private or not exist. If private, configure GITHUB_ACCESS_TOKEN." }, { status: 404 });
     }
     
     const repoData = await repoRes.json();
     const defaultBranch = repoData.default_branch;
 
-    // 2. Fetch Repository Tree
-    const treeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${defaultBranch}?recursive=1`, {
-      headers: { "User-Agent": "BugHunter-AI" }
-    });
+    const treeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${defaultBranch}?recursive=1`, { headers: githubHeaders });
     
     const filesAnalyzed: string[] = [];
-    let codebaseContent = "";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const vulnerabilities: any[] = [];
+    let scaContent = "";
+    const sourceChunks: string[] = [""];
+    let currentChunkIndex = 0;
+    const CHUNK_LIMIT = 20000; // characters
     
     if (treeRes.ok) {
       const treeData = await treeRes.json();
       const allFiles = treeData.tree || [];
       
-      // Target files that commonly contain vulnerabilities
       const targetExtensions = ['.js', '.ts', '.jsx', '.tsx', '.py', '.go', '.php', '.yml', '.yaml', '.json'];
-      const targetFiles = ['.env.example', 'Dockerfile', 'docker-compose.yml', 'package.json'];
+      const targetFiles = ['.env.example', 'Dockerfile', 'docker-compose.yml', 'package.json', 'requirements.txt', 'go.mod'];
       
-      const filesToFetch = allFiles.filter((f: { type: string, path: string }) => {
+      const filesToFetch = allFiles.filter((f: { type: string, path: string, url: string }) => {
         if (f.type !== 'blob') return false;
-        // Don't fetch huge vendor folders
-        if (f.path.includes('node_modules') || f.path.includes('vendor') || f.path.includes('dist')) return false;
+        if (f.path.includes('node_modules') || f.path.includes('vendor') || f.path.includes('dist') || f.path.includes('.git')) return false;
         
         const isTargetExtension = targetExtensions.some(ext => f.path.endsWith(ext));
         const isTargetFile = targetFiles.some(tf => f.path.endsWith(tf));
         return isTargetExtension || isTargetFile;
-      }).slice(0, 15); // Limit to 15 files to avoid token limits
-
-      // 3. Fetch file contents
+      }).slice(0, 30); // Grab up to 30 relevant files to analyze
+      
       for (const file of filesToFetch) {
         try {
-          const contentRes = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/${defaultBranch}/${file.path}`);
+          const contentRes = await fetch(file.url, { headers: githubHeaders });
           if (contentRes.ok) {
-            const content = await contentRes.text();
-            codebaseContent += `\n\n--- FILE: ${file.path} ---\n${content.slice(0, 2000)}`; // Limit size per file
+            const blobData = await contentRes.json();
+            const content = Buffer.from(blobData.content, 'base64').toString('utf-8');
             filesAnalyzed.push(file.path);
+
+            const fileSecrets = scanForSecrets(content, file.path);
+            vulnerabilities.push(...fileSecrets);
+
+            if (file.path.endsWith("package.json") || file.path.endsWith("requirements.txt") || file.path.endsWith("go.mod")) {
+              scaContent += `\n\n--- FILE: ${file.path} ---\n${content.slice(0, 4000)}`;
+            } else {
+              const fileContext = `\n\n--- FILE: ${file.path} ---\n${content.slice(0, 4000)}`;
+              if (sourceChunks[currentChunkIndex].length + fileContext.length > CHUNK_LIMIT) {
+                if (sourceChunks.length >= 3) continue; // limit to 3 chunks to prevent massive token usage
+                sourceChunks.push("");
+                currentChunkIndex++;
+              }
+              sourceChunks[currentChunkIndex] += fileContext;
+            }
           }
         } catch {
           console.error(`Failed to fetch ${file.path}`);
@@ -86,7 +124,6 @@ export async function POST(req: Request) {
       }
     }
 
-    // 4. Create Scan Record in DB
     const { data: scan, error: scanError } = await supabase
       .from("scans")
       .insert({
@@ -101,14 +138,41 @@ export async function POST(req: Request) {
 
     if (scanError || !scan) throw new Error("Failed to create scan record");
 
-    // 5. Analyze with Gemini
-    const vulnerabilities = [];
     let securityScore = 100;
 
-    if (codebaseContent) {
-      try {
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-        const prompt = `
+    // Run AI Analysis concurrently
+    try {
+      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+      const aiPromises = [];
+
+      if (scaContent.trim()) {
+        const scaPrompt = `
+          Act as an expert Software Composition Analysis (SCA) tool.
+          Analyze the following dependency files (e.g., package.json, requirements.txt).
+          Identify if any dependencies are severely outdated, deprecated, or likely to have vulnerabilities.
+          Provide the output as a valid JSON array of objects. Do not include markdown formatting like \`\`\`json.
+          
+          Format for each object:
+          {
+            "name": "Vulnerable Dependency: [Name]",
+            "description": "Detailed explanation of the issue with this dependency version",
+            "severity": "critical|high|medium|low|info",
+            "category": "sast",
+            "remediation": "How to fix this issue (e.g., Upgrade to version X.Y.Z)",
+            "ai_explanation": "A friendly explanation of why this dependency is risky"
+          }
+          
+          If no vulnerabilities are found, return an empty array [].
+          
+          CODE:
+          ${scaContent}
+        `;
+        aiPromises.push(model.generateContent(scaPrompt));
+      }
+
+      for (const chunk of sourceChunks) {
+        if (!chunk.trim()) continue;
+        const sastPrompt = `
           Act as an expert Static Application Security Testing (SAST) tool.
           Analyze the following source code snippets from a GitHub repository for security vulnerabilities (e.g., hardcoded secrets, SQL injection, XSS, insecure dependencies, bad practices).
           
@@ -127,66 +191,61 @@ export async function POST(req: Request) {
           If no vulnerabilities are found, return an empty array [].
           
           CODEBASE TO ANALYZE:
-          ${codebaseContent}
+          ${chunk}
         `;
+        aiPromises.push(model.generateContent(sastPrompt));
+      }
 
-        const aiResult = await model.generateContent(prompt);
-        let responseText = aiResult.response.text();
-        
-        // Clean up markdown wrapping if present
-        responseText = responseText.replace(/^```json\s*/, "").replace(/\s*```$/, "").trim();
-        
-        const aiVulns = JSON.parse(responseText);
-        
-        if (Array.isArray(aiVulns)) {
-          for (const v of aiVulns) {
-            vulnerabilities.push({
-              scan_id: scan.id,
-              name: v.name || "Code Vulnerability",
-              description: v.description,
-              severity: v.severity,
-              category: "sast",
-              remediation: v.remediation,
-              ai_explanation: v.ai_explanation,
-            });
-            
-            // Deduct score
-            if (v.severity === "critical") securityScore -= 20;
-            if (v.severity === "high") securityScore -= 10;
-            if (v.severity === "medium") securityScore -= 5;
-            if (v.severity === "low") securityScore -= 2;
+      const results = await Promise.allSettled(aiPromises);
+
+      for (const res of results) {
+        if (res.status === "fulfilled") {
+          let responseText = res.value.response.text();
+          responseText = responseText.replace(/^```json\s*/, "").replace(/\s*```$/, "").trim();
+          try {
+            const aiVulns = JSON.parse(responseText);
+            if (Array.isArray(aiVulns)) {
+              vulnerabilities.push(...aiVulns);
+            }
+          } catch (e) {
+            console.error("Failed to parse chunk", e);
           }
         }
-      } catch (aiErr) {
-        console.error("AI Analysis failed:", aiErr);
-        vulnerabilities.push({
-          scan_id: scan.id,
-          name: "SAST Analysis Failed",
-          description: "Could not parse AI response or AI failed.",
-          severity: "info",
-          category: "sast",
-          remediation: "Try again later.",
-        });
       }
-    } else {
-       vulnerabilities.push({
-          scan_id: scan.id,
-          name: "No Code Found",
-          description: "Could not find recognizable code files in this repository.",
-          severity: "info",
-          category: "sast",
-          remediation: "Ensure the repository is public and contains code.",
-       });
+    } catch (aiErr) {
+      console.error("AI Analysis failed:", aiErr);
     }
+
+    // Attach scan_id and deduct score
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const finalVulns = vulnerabilities.map((v: any) => {
+      if (v.severity === "critical") securityScore -= 20;
+      if (v.severity === "high") securityScore -= 10;
+      if (v.severity === "medium") securityScore -= 5;
+      if (v.severity === "low") securityScore -= 2;
+
+      return {
+        scan_id: scan.id,
+        name: v.name || "Code Vulnerability",
+        description: v.description,
+        severity: v.severity || "medium",
+        category: "sast",
+        remediation: v.remediation,
+        ai_explanation: v.ai_explanation,
+      };
+    });
+
+    // Deduplicate vulnerabilities by name to avoid identical AI findings across chunks
+    const uniqueVulns = finalVulns.filter((v, index, self) => 
+      index === self.findIndex((t) => (t.name === v.name))
+    );
 
     securityScore = Math.max(0, securityScore);
 
-    // 6. Save Vulnerabilities
-    if (vulnerabilities.length > 0) {
-      await supabase.from("vulnerabilities").insert(vulnerabilities);
+    if (uniqueVulns.length > 0) {
+      await supabase.from("vulnerabilities").insert(uniqueVulns);
     }
 
-    // 7. Update Scan Record
     const duration = Date.now() - startTime;
     await supabase
       .from("scans")
@@ -201,7 +260,7 @@ export async function POST(req: Request) {
       id: scan.id,
       target_url: url,
       security_score: securityScore,
-      vulnerabilities,
+      vulnerabilities: uniqueVulns,
       technologies: filesAnalyzed,
       scan_duration_ms: duration,
     });
