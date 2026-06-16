@@ -10,9 +10,37 @@ import {
   Globe,
   Github,
   AlertTriangle,
-  CheckCircle
+  CheckCircle,
+  Play,
+  Pause,
+  RefreshCw
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Tooltip,
+  Filler
+} from 'chart.js';
+import { Line } from 'react-chartjs-2';
+
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Tooltip,
+  Filler
+);
+
+interface ScanHistoryEntry {
+  id: string;
+  security_score: number;
+  created_at: string;
+}
 
 interface ScheduledScan {
   id: string;
@@ -22,6 +50,8 @@ interface ScheduledScan {
   last_run: string | null;
   next_run: string;
   is_active: boolean;
+  history?: ScanHistoryEntry[];
+  latestScore?: number | null;
 }
 
 const fadeUp = {
@@ -50,13 +80,36 @@ export default function MonitoringPage() {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
-    const { data } = await supabase
+    const { data: monitorsData } = await supabase
       .from("scheduled_scans")
       .select("*")
       .eq("user_id", user.id)
       .order("created_at", { ascending: false });
 
-    if (data) setMonitors(data);
+    if (monitorsData) {
+      const { data: scansData } = await supabase
+        .from("scans")
+        .select("id, target_url, security_score, created_at, status")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false });
+
+      const monitorsWithHistory = monitorsData.map((monitor: any) => {
+        const history = scansData
+          ?.filter((s) => s.target_url === monitor.target_url && s.status === 'completed')
+          .slice(0, 10)
+          .reverse() || [];
+        
+        const latestScore = history.length > 0 ? history[history.length - 1].security_score : null;
+
+        return {
+          ...monitor,
+          history,
+          latestScore
+        };
+      });
+
+      setMonitors(monitorsWithHistory);
+    }
     setLoading(false);
   };
 
@@ -102,6 +155,46 @@ export default function MonitoringPage() {
     if (!confirm("Are you sure you want to delete this monitor?")) return;
     await supabase.from("scheduled_scans").delete().eq("id", id);
     fetchMonitors();
+  };
+
+  const handleToggleActive = async (id: string, currentStatus: boolean) => {
+    const { error } = await supabase
+      .from("scheduled_scans")
+      .update({ is_active: !currentStatus })
+      .eq("id", id);
+      
+    if (!error) {
+      fetchMonitors();
+    }
+  };
+
+  const [runningScans, setRunningScans] = useState<Record<string, boolean>>({});
+
+  const handleRunNow = async (monitor: ScheduledScan) => {
+    setRunningScans(prev => ({ ...prev, [monitor.id]: true }));
+    try {
+      const endpoint = monitor.target_type === "url" ? "/api/scan" : "/api/scan/github";
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: monitor.target_url }),
+      });
+
+      if (response.ok) {
+        await supabase
+          .from("scheduled_scans")
+          .update({ last_run: new Date().toISOString() })
+          .eq("id", monitor.id);
+          
+        fetchMonitors();
+      } else {
+        alert("Scan failed to run.");
+      }
+    } catch (e) {
+      alert("Error triggering scan.");
+    } finally {
+      setRunningScans(prev => ({ ...prev, [monitor.id]: false }));
+    }
   };
 
   return (
@@ -211,15 +304,42 @@ export default function MonitoringPage() {
               <thead>
                 <tr>
                   <th>Target</th>
+                  <th>Trend (Last 10)</th>
                   <th>Frequency</th>
                   <th>Last Run</th>
-                  <th>Next Run</th>
                   <th>Status</th>
-                  <th></th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {monitors.map((m) => (
+                {monitors.map((m) => {
+                  const chartData = {
+                    labels: m.history?.map((h) => new Date(h.created_at).toLocaleDateString()) || [],
+                    datasets: [
+                      {
+                        data: m.history?.map((h) => h.security_score) || [],
+                        borderColor: '#00f5d4',
+                        backgroundColor: 'rgba(0, 245, 212, 0.1)',
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        pointHoverRadius: 4,
+                        fill: true,
+                        tension: 0.4,
+                      },
+                    ],
+                  };
+
+                  const chartOptions = {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false }, tooltip: { enabled: true } },
+                    scales: {
+                      x: { display: false },
+                      y: { display: false, min: 0, max: 100 },
+                    },
+                  };
+
+                  return (
                   <tr key={m.id}>
                     <td>
                       <div className="flex items-center gap-2">
@@ -228,40 +348,71 @@ export default function MonitoringPage() {
                         ) : (
                            <Github className="w-4 h-4 text-text-muted" />
                         )}
-                        <span className="font-medium truncate max-w-[200px]">{m.target_url}</span>
+                        <div className="flex flex-col">
+                           <span className="font-medium truncate max-w-[200px]">{m.target_url}</span>
+                           {m.latestScore !== undefined && m.latestScore !== null && (
+                             <span className="text-xs text-text-secondary mt-0.5">
+                               Latest Score: <strong className={m.latestScore >= 90 ? "text-severity-low" : m.latestScore >= 70 ? "text-severity-medium" : "text-severity-critical"}>{m.latestScore}</strong>
+                             </span>
+                           )}
+                        </div>
                       </div>
+                    </td>
+                    <td className="w-32 h-12">
+                      {m.history && m.history.length > 1 ? (
+                        <Line data={chartData} options={chartOptions as any} />
+                      ) : (
+                        <span className="text-xs text-text-muted italic">Not enough data</span>
+                      )}
                     </td>
                     <td>
                       <span className="capitalize text-sm">{m.frequency}</span>
                     </td>
                     <td className="text-sm text-text-secondary">
                       {m.last_run ? new Date(m.last_run).toLocaleDateString() : "Never"}
-                    </td>
-                    <td className="text-sm text-text-secondary">
-                      {new Date(m.next_run).toLocaleDateString()}
+                      <div className="text-xs text-text-muted mt-0.5">Next: {new Date(m.next_run).toLocaleDateString()}</div>
                     </td>
                     <td>
-                      {m.is_active ? (
-                        <span className="badge badge-low flex items-center gap-1 w-fit">
-                          <CheckCircle className="w-3 h-3" /> Active
-                        </span>
-                      ) : (
-                        <span className="badge badge-medium flex items-center gap-1 w-fit">
-                          <AlertTriangle className="w-3 h-3" /> Paused
-                        </span>
-                      )}
-                    </td>
-                    <td className="text-right">
-                      <button
-                        onClick={() => handleDelete(m.id)}
-                        className="p-2 text-text-muted hover:text-severity-critical transition-colors rounded-lg hover:bg-severity-critical/10"
-                        title="Delete Monitor"
+                      <button 
+                        onClick={() => handleToggleActive(m.id, m.is_active)}
+                        className={`badge ${m.is_active ? 'badge-low' : 'badge-medium'} flex items-center gap-1 w-fit cursor-pointer hover:opacity-80 transition-opacity`}
+                        title={m.is_active ? "Click to Pause" : "Click to Resume"}
                       >
-                        <Trash2 className="w-4 h-4" />
+                        {m.is_active ? (
+                          <><CheckCircle className="w-3 h-3" /> Active</>
+                        ) : (
+                          <><AlertTriangle className="w-3 h-3" /> Paused</>
+                        )}
                       </button>
                     </td>
+                    <td className="text-right">
+                      <div className="flex items-center justify-end gap-1">
+                        <button
+                          onClick={() => handleRunNow(m)}
+                          disabled={runningScans[m.id]}
+                          className="p-2 text-text-muted hover:text-accent-cyan transition-colors rounded-lg hover:bg-accent-cyan/10 disabled:opacity-50"
+                          title="Run Scan Now"
+                        >
+                          <RefreshCw className={`w-4 h-4 ${runningScans[m.id] ? "animate-spin text-accent-cyan" : ""}`} />
+                        </button>
+                        <button
+                          onClick={() => handleToggleActive(m.id, m.is_active)}
+                          className="p-2 text-text-muted hover:text-white transition-colors rounded-lg hover:bg-white/10"
+                          title={m.is_active ? "Pause Monitor" : "Resume Monitor"}
+                        >
+                          {m.is_active ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                        </button>
+                        <button
+                          onClick={() => handleDelete(m.id)}
+                          className="p-2 text-text-muted hover:text-severity-critical transition-colors rounded-lg hover:bg-severity-critical/10"
+                          title="Delete Monitor"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </td>
                   </tr>
-                ))}
+                )})}
               </tbody>
             </table>
           </div>
