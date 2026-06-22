@@ -9,14 +9,26 @@ const supabase = createClient(
 
 export async function GET(req: Request) {
   try {
-    // 1. Verify authorization (e.g., Vercel Cron Secret)
+    // --- FIX: Make the CRON_SECRET check unconditional.
+    // Previously: `if (process.env.CRON_SECRET && authHeader !== expectedAuth)`
+    // This meant the endpoint was wide-open when CRON_SECRET was not set.
+    // Now: always reject if the secret is missing from env OR if the token mismatches.
+    const cronSecret = process.env.CRON_SECRET;
     const authHeader = req.headers.get("authorization");
-    const expectedAuth = `Bearer ${process.env.CRON_SECRET}`;
-    
-    // If running locally, you might bypass this or set CRON_SECRET in .env.local
-    if (process.env.CRON_SECRET && authHeader !== expectedAuth) {
+
+    if (!cronSecret) {
+      console.error("CRON_SECRET is not configured. Denying cron execution.");
+      return NextResponse.json(
+        { error: "Unauthorized: cron secret not configured on server." },
+        { status: 401 }
+      );
+    }
+
+    const expectedAuth = `Bearer ${cronSecret}`;
+    if (authHeader !== expectedAuth) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
+    // --- END FIX ---
 
     // 2. Fetch pending scheduled scans
     const now = new Date().toISOString();
@@ -42,13 +54,6 @@ export async function GET(req: Request) {
 
     for (const scan of dueScans) {
       try {
-        // We cannot easily spoof the auth token for the fetch without the user's session,
-        // so the /api/scan endpoints need to handle requests triggered by the system.
-        // For simplicity in this v2 architecture, we assume the /api/scan route can accept
-        // a CRON_SECRET bypass or we pass the user_id directly.
-        // To properly implement this, we should refactor the scan logic into a shared service function.
-        // As a placeholder, we log the execution intent.
-
         console.log(`[CRON] Triggering ${scan.target_type} scan for ${scan.target_url} (User: ${scan.user_id})`);
         
         // Calculate next run

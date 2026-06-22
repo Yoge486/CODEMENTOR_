@@ -93,10 +93,12 @@ CREATE TABLE IF NOT EXISTS scheduled_scans (
 -- Profiles RLS
 ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can view own profile" ON profiles;
 CREATE POLICY "Users can view own profile"
   ON profiles FOR SELECT
   USING (auth.uid() = id);
 
+DROP POLICY IF EXISTS "Users can update own profile" ON profiles;
 CREATE POLICY "Users can update own profile"
   ON profiles FOR UPDATE
   USING (auth.uid() = id);
@@ -104,18 +106,22 @@ CREATE POLICY "Users can update own profile"
 -- Scans RLS
 ALTER TABLE scans ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can view own scans" ON scans;
 CREATE POLICY "Users can view own scans"
   ON scans FOR SELECT
   USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can insert own scans" ON scans;
 CREATE POLICY "Users can insert own scans"
   ON scans FOR INSERT
   WITH CHECK (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can update own scans" ON scans;
 CREATE POLICY "Users can update own scans"
   ON scans FOR UPDATE
   USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can delete own scans" ON scans;
 CREATE POLICY "Users can delete own scans"
   ON scans FOR DELETE
   USING (auth.uid() = user_id);
@@ -123,12 +129,14 @@ CREATE POLICY "Users can delete own scans"
 -- Vulnerabilities RLS
 ALTER TABLE vulnerabilities ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can view own vulnerabilities" ON vulnerabilities;
 CREATE POLICY "Users can view own vulnerabilities"
   ON vulnerabilities FOR SELECT
   USING (
     scan_id IN (SELECT id FROM scans WHERE user_id = auth.uid())
   );
 
+DROP POLICY IF EXISTS "Users can insert vulnerabilities for own scans" ON vulnerabilities;
 CREATE POLICY "Users can insert vulnerabilities for own scans"
   ON vulnerabilities FOR INSERT
   WITH CHECK (
@@ -138,18 +146,22 @@ CREATE POLICY "Users can insert vulnerabilities for own scans"
 -- Scheduled Scans RLS
 ALTER TABLE scheduled_scans ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can view own scheduled scans" ON scheduled_scans;
 CREATE POLICY "Users can view own scheduled scans"
   ON scheduled_scans FOR SELECT
   USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can insert own scheduled scans" ON scheduled_scans;
 CREATE POLICY "Users can insert own scheduled scans"
   ON scheduled_scans FOR INSERT
   WITH CHECK (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can update own scheduled scans" ON scheduled_scans;
 CREATE POLICY "Users can update own scheduled scans"
   ON scheduled_scans FOR UPDATE
   USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can delete own scheduled scans" ON scheduled_scans;
 CREATE POLICY "Users can delete own scheduled scans"
   ON scheduled_scans FOR DELETE
   USING (auth.uid() = user_id);

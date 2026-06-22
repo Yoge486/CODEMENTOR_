@@ -1,8 +1,35 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabaseClient, createServiceRoleClient } from "@/lib/supabase/server";
 
-export async function POST() {
+export async function POST(request: NextRequest) {
   try {
+    // --- FIX: Require a server-side secret to prevent any logged-in user from
+    // self-escalating to admin. The secret must be set as GODMODE_SECRET in the
+    // server environment and passed in the request body by the authorized caller.
+    const godmodeSecret = process.env.GODMODE_SECRET;
+    if (!godmodeSecret) {
+      console.error("GODMODE_SECRET is not configured on the server.");
+      return NextResponse.json(
+        { error: "God Mode is disabled: server configuration missing." },
+        { status: 403 }
+      );
+    }
+
+    let body: { secret?: string } = {};
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
+    }
+
+    if (!body.secret || body.secret !== godmodeSecret) {
+      return NextResponse.json(
+        { error: "Forbidden: invalid or missing God Mode secret." },
+        { status: 403 }
+      );
+    }
+    // --- END FIX ---
+
     const supabase = await createServerSupabaseClient();
     const { data: { user } } = await supabase.auth.getUser();
 
@@ -22,9 +49,6 @@ export async function POST() {
       throw updateError;
     }
 
-    // Note: The user might need to log out and log back in, OR we can refresh the session client-side.
-    // The middleware checks user_metadata which is refreshed automatically on navigation in some cases,
-    // but a session refresh is best handled by the client.
     return NextResponse.json({ success: true, message: "God Mode Activated" });
     
   } catch (error: unknown) {

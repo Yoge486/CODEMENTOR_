@@ -44,10 +44,21 @@ export default function HistoryPage() {
 
   useEffect(() => {
     const fetchScans = async () => {
+      // --- FIX: Explicitly filter by user_id rather than relying solely on RLS.
+      // Defense-in-depth: even if RLS were misconfigured, only the authenticated
+      // user's scans would be returned.
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        setLoading(false);
+        return;
+      }
+
       const { data } = await supabase
         .from("scans")
         .select("*")
+        .eq("user_id", user.id) // Explicit user filter
         .order("created_at", { ascending: false });
+      // --- END FIX ---
 
       if (data) setScans(data);
       setLoading(false);

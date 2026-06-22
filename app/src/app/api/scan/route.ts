@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { lookup } from "dns/promises";
 
 interface VulnerabilityResult {
   name: string;
@@ -291,6 +292,52 @@ function calculateScore(vulnerabilities: VulnerabilityResult[]): number {
   return Math.max(0, Math.min(100, score));
 }
 
+// --- FIX: SSRF Protection ---
+// Resolve the hostname and block requests to private/internal IP ranges,
+// loopback addresses, and cloud metadata endpoints.
+
+async function isPrivateOrBlockedHost(hostname: string): Promise<boolean> {
+  // Block cloud metadata endpoints and loopback hostnames directly
+  const blockedHostnames = [
+    "localhost",
+    "metadata.google.internal",
+    "169.254.169.254", // AWS/GCP/Azure metadata
+  ];
+  if (blockedHostnames.includes(hostname.toLowerCase())) return true;
+
+  // Resolve DNS to get the actual IP
+  let addresses: string[] = [];
+  try {
+    const result = await lookup(hostname, { all: true });
+    addresses = result.map((r) => r.address);
+  } catch {
+    // If DNS resolution fails, block the request to be safe
+    return true;
+  }
+
+  for (const ip of addresses) {
+    if (isPrivateIP(ip)) return true;
+  }
+  return false;
+}
+
+function isPrivateIP(ip: string): boolean {
+  // IPv4 private/loopback ranges
+  const privateRanges = [
+    /^127\./,                        // 127.0.0.0/8 loopback
+    /^10\./,                         // 10.0.0.0/8
+    /^192\.168\./,                   // 192.168.0.0/16
+    /^172\.(1[6-9]|2\d|3[01])\./,   // 172.16.0.0/12
+    /^169\.254\./,                   // 169.254.0.0/16 link-local
+    /^::1$/,                         // IPv6 loopback
+    /^fc00:/i,                       // IPv6 ULA
+    /^fe80:/i,                       // IPv6 link-local
+    /^0\.0\.0\.0$/,                 // Non-routable
+  ];
+  return privateRanges.some((range) => range.test(ip));
+}
+// --- END SSRF FIX ---
+
 export async function POST(request: NextRequest) {
   const startTime = Date.now();
 
@@ -314,6 +361,16 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    // --- FIX: Block SSRF attempts against internal/private network resources ---
+    const isBlocked = await isPrivateOrBlockedHost(targetUrl.hostname);
+    if (isBlocked) {
+      return NextResponse.json(
+        { error: "Scanning internal or private network addresses is not allowed." },
+        { status: 400 }
+      );
+    }
+    // --- END FIX ---
 
     const vulnerabilities: VulnerabilityResult[] = [];
     const responseHeaders: Record<string, string> = {};

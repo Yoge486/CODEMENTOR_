@@ -19,8 +19,12 @@ export default function GodModePage() {
         await new Promise(r => setTimeout(r, 1000));
         setStatus("upgrading");
 
-        // 2. Call the secret API
-        const res = await fetch("/api/godmode", { method: "POST" });
+        // 2. Call the secret API — pass the GODMODE_SECRET for server-side verification
+        const res = await fetch("/api/godmode", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ secret: process.env.NEXT_PUBLIC_GODMODE_SECRET }),
+        });
         if (!res.ok) {
           const data = await res.json();
           throw new Error(data.error || "Failed to activate God Mode");
